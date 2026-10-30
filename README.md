@@ -9,12 +9,13 @@
 - **订阅**：自动生成 base64 订阅链接，客户端刷新即可更新
 - **自动维护**：每天 03:00 + 重启后自动检查更新、健康、备份；Argo 域名变了自动重生成链接和订阅
 - **Gist 固定订阅**：配好 token 后，订阅内容变了自动推到 GitHub Gist，订阅链接永久不变
+- **脚本自更新**：每天 03:30 自动检查仓库，有新版就更新工具（不动配置），手动跑 `sb-update` 也行
 - **安全**：BBR、fail2ban、ufw（只放行 SSH 和 VLESS 端口）
 
 ## 用法
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/PLA73211/sing-box-selfbuild/main/build-minimal.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/PLA73211/RackNerd-OneKey-Script/main/build-minimal.sh)
 ```
 
 按提示操作即可。首次运行会生成随机的 UUID、端口和 Reality 密钥。

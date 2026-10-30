@@ -1,5 +1,7 @@
 #!/bin/bash
-# build-minimal.sh —— 从零一键自搭最小版（草稿，未上 VPS）
+# build-minimal.sh —— 从零一键自搭最小版
+# 版本号：sb-update 靠它判断仓库有没有新版
+VERSION="1.1.0"
 # 目标：只保移动 + 电信稳定，不泄露真实 IP，DNS / WebRTC 不泄露，分流统一，Wi-Fi 通话能用
 # base 最基本两个（先确保 VPS 出口）：VMess-WS 2052（Argo → VPS直连）、VLESS-Reality（电信直连 → VPS直连）
 # 住宅 IP 是后续加的：填了住宅信息才加 VMess-resi 2053（Argo → 住宅），不填就只有上面两个 VPS 直连节点
@@ -581,20 +583,22 @@ if ! systemctl is-active --quiet sing-box 2>/dev/null; then
 else
   log "sing-box 正常"
 fi
-# 3. cloudflared 健康检查，挂了就重启（端口从配置里读）
+# 3. cloudflared 健康检查，挂了就重启（端口从配置里读，英国隧道也管）
 PORT_VM=$(jq -r '.inbounds[] | select(.tag=="vmess-sb") | .listen_port' "$SB_JSON" 2>/dev/null)
 PORT_RESI=$(jq -r '.inbounds[] | select(.tag=="vmess-resi") | .listen_port' "$SB_JSON" 2>/dev/null)
-for PORT in "$PORT_VM" "$PORT_RESI"; do
+PORT_UK=$(jq -r '.inbounds[] | select(.tag=="vmess-resi-uk") | .listen_port' "$SB_JSON" 2>/dev/null)
+for PORT in "$PORT_VM" "$PORT_RESI" "$PORT_UK"; do
   [[ -z "$PORT" || "$PORT" == "null" ]] && continue
+  case "$PORT" in
+    "$PORT_VM") TUN_LOG="$SB_DIR/argo.log" ;;
+    "$PORT_RESI") TUN_LOG="$SB_DIR/argo-resi.log" ;;
+    *) TUN_LOG="$SB_DIR/argo-uk.log" ;;
+  esac
   if pgrep -f "cloudflared tunnel --url http://localhost:$PORT" >/dev/null 2>&1; then
     log "cloudflared $PORT 正常"
   else
     log "cloudflared $PORT 没在跑，尝试重起"
-    if [[ "$PORT" == "$PORT_VM" ]]; then
-      nohup "$CF_BIN" tunnel --url "http://localhost:$PORT" --edge-ip-version auto --no-autoupdate --protocol http2 > "$SB_DIR/argo.log" 2>&1 &
-    else
-      nohup "$CF_BIN" tunnel --url "http://localhost:$PORT" --edge-ip-version auto --no-autoupdate --protocol http2 > "$SB_DIR/argo-resi.log" 2>&1 &
-    fi
+    nohup "$CF_BIN" tunnel --url "http://localhost:$PORT" --edge-ip-version auto --no-autoupdate --protocol http2 > "$TUN_LOG" 2>&1 &
     sleep 15
     log "cloudflared $PORT 重起后：$(pgrep -f "cloudflared tunnel --url http://localhost:$PORT" >/dev/null && echo 运行中 || echo 仍没起来)"
   fi
@@ -614,48 +618,74 @@ if ! pgrep -f "cloudflared tunnel --url http://localhost:8000" >/dev/null 2>&1; 
     echo "$(date '+%F %T') 订阅隧道重起，新域名：$SUB_NEW" >> "$LOG"
   fi
 fi
-# 4. Argo 域名变了就重生成链接（只换 host/sni，UUID、端口、前置域名都不变）
+# 4. Argo 域名变了就重生成链接（只换 host/sni，UUID、端口、前置域名都不变；英国节点也一起处理）
 sleep 2
 ARGO_NEW=$(grep -a trycloudflare.com "$SB_DIR/argo.log" 2>/dev/null | awk 'NR==2{print}' | awk -F// '{print $2}' | awk '{print $1}')
 ARGO_RESI_NEW=$(grep -a trycloudflare.com "$SB_DIR/argo-resi.log" 2>/dev/null | awk 'NR==2{print}' | awk -F// '{print $2}' | awk '{print $1}')
+ARGO_UK_NEW=$(grep -a trycloudflare.com "$SB_DIR/argo-uk.log" 2>/dev/null | awk 'NR==2{print}' | awk -F// '{print $2}' | awk '{print $1}')
 ARGO_OLD=$(grep "^Argo 2052:" "$SB_DIR/nodes.txt" 2>/dev/null | awk '{print $3}')
 ARGO_RESI_OLD=$(grep "^Argo-resi 2053:" "$SB_DIR/nodes.txt" 2>/dev/null | awk '{print $3}')
-if [[ -n "$ARGO_NEW" && -n "$ARGO_RESI_NEW" && ("$ARGO_NEW" != "$ARGO_OLD" || "$ARGO_RESI_NEW" != "$ARGO_RESI_OLD") ]]; then
-  log "Argo 域名变了，重新生成链接：$ARGO_OLD -> $ARGO_NEW，$ARGO_RESI_OLD -> $ARGO_RESI_NEW"
-  UUID=$(jq -r '.inbounds[1].users[0].uuid' "$SB_JSON" 2>/dev/null)
-  FRONT_DOMAIN=$(jq -r '.front_domain' "$META" 2>/dev/null)
-  [[ -z "$FRONT_DOMAIN" || "$FRONT_DOMAIN" == "null" ]] && FRONT_DOMAIN="cloudflare-ech.com"
-  VM_ADD=$(jq -r '.vm_add' "$META" 2>/dev/null)
-  [[ -z "$VM_ADD" || "$VM_ADD" == "null" ]] && VM_ADD="$FRONT_DOMAIN"
-  PS_RESI=$(jq -r '.ps_resi' "$META" 2>/dev/null)
-  [[ -z "$PS_RESI" || "$PS_RESI" == "null" ]] && PS_RESI="移动ARGO住宅"
-  HOSTNAME_S=$(jq -r '.hostname' "$META" 2>/dev/null)
-  [[ -z "$HOSTNAME_S" || "$HOSTNAME_S" == "null" ]] && HOSTNAME_S=$(hostname)
-  if [[ -n "$UUID" && "$UUID" != "null" ]]; then
-    VM_JSON=$(python3 -c "import json,base64; d={'add':'$VM_ADD','aid':'0','host':'$ARGO_NEW','id':'$UUID','net':'ws','path':'$UUID-vm','port':'443','ps':'移动ARGO','tls':'tls','sni':'$ARGO_NEW','fp':'chrome','type':'none','v':'2'}; print('vmess://'+base64.b64encode(json.dumps(d).encode()).decode())")
-    VM_RESI_JSON=$(python3 -c "import json,base64; d={'add':'$VM_ADD','aid':'0','host':'$ARGO_RESI_NEW','id':'$UUID','net':'ws','path':'$UUID-resi','port':'443','ps':'$PS_RESI','tls':'tls','sni':'$ARGO_RESI_NEW','fp':'chrome','type':'none','v':'2'}; print('vmess://'+base64.b64encode(json.dumps(d).encode()).decode())")
-    echo "$VM_JSON" > "$SB_DIR/vm_ws_argols.txt"
-    echo "$VM_RESI_JSON" > "$SB_DIR/vm_ws_argoresi.txt"
-    VLESS_LINK=$(grep "^VLESS:" "$SB_DIR/nodes.txt" 2>/dev/null | cut -d' ' -f2-)
-    {
-      echo "VLESS: $VLESS_LINK"
-      echo "VMess-Argo: $VM_JSON"
-      echo "VMess-resi: $VM_RESI_JSON"
-      echo "Argo 2052: $ARGO_NEW"
-      echo "Argo-resi 2053: $ARGO_RESI_NEW"
-    } > "$SB_DIR/nodes.txt"
-    # 订阅文件也跟着重生成
-    SUB_NAME_M=$(python3 -c "import json; print(json.load(open('$SB_DIR/meta.json')).get('sub_name','sub'))" 2>/dev/null || echo sub)
-    {
-      grep "^VLESS:" "$SB_DIR/nodes.txt" 2>/dev/null | cut -d' ' -f2-
-      echo "$VM_JSON"
-      echo "$VM_RESI_JSON"
-      grep "^VLESS-TLS:" "$SB_DIR/nodes.txt" 2>/dev/null | cut -d' ' -f2-
-    } | grep -v '^$' > "$SB_DIR/$SUB_NAME_M.txt"
-    base64 -w0 "$SB_DIR/$SUB_NAME_M.txt" > "$SB_DIR/$SUB_NAME_M.b64" 2>/dev/null || true
-    log "链接已重生成，见 $SB_DIR/nodes.txt，订阅文件已同步，客户端重新导入订阅或链接即可"
+ARGO_UK_OLD=$(grep "^Argo-uk 2054:" "$SB_DIR/nodes.txt" 2>/dev/null | awk '{print $3}')
+HAS_UK=$(jq -r '.inbounds[] | select(.tag=="vmess-resi-uk") | .tag' "$SB_JSON" 2>/dev/null)
+NEED_REGEN=0
+[[ -n "$ARGO_NEW" && "$ARGO_NEW" != "$ARGO_OLD" ]] && NEED_REGEN=1
+[[ -n "$ARGO_RESI_NEW" && "$ARGO_RESI_NEW" != "$ARGO_RESI_OLD" ]] && NEED_REGEN=1
+[[ -n "$HAS_UK" && -n "$ARGO_UK_NEW" && "$ARGO_UK_NEW" != "$ARGO_UK_OLD" ]] && NEED_REGEN=1
+if [[ "$NEED_REGEN" == "1" ]]; then
+  if [[ -z "$ARGO_NEW" || -z "$ARGO_RESI_NEW" ]]; then
+    log "Argo 域名没取到，不重生成链接"
   else
-    log "UUID 读不到，没重生成链接"
+    log "Argo 域名变了，重新生成链接：$ARGO_OLD -> $ARGO_NEW，$ARGO_RESI_OLD -> $ARGO_RESI_NEW"
+    UUID=$(jq -r '.inbounds[1].users[0].uuid' "$SB_JSON" 2>/dev/null)
+    FRONT_DOMAIN=$(jq -r '.front_domain' "$META" 2>/dev/null)
+    [[ -z "$FRONT_DOMAIN" || "$FRONT_DOMAIN" == "null" ]] && FRONT_DOMAIN="cloudflare-ech.com"
+    VM_ADD=$(jq -r '.vm_add' "$META" 2>/dev/null)
+    [[ -z "$VM_ADD" || "$VM_ADD" == "null" ]] && VM_ADD="$FRONT_DOMAIN"
+    PS_RESI=$(jq -r '.ps_resi' "$META" 2>/dev/null)
+    [[ -z "$PS_RESI" || "$PS_RESI" == "null" ]] && PS_RESI="移动ARGO住宅"
+    PS_UK=$(jq -r '.ps_uk' "$META" 2>/dev/null)
+    [[ -z "$PS_UK" || "$PS_UK" == "null" ]] && PS_UK="移动ARGO住宅"
+    if [[ -n "$UUID" && "$UUID" != "null" ]]; then
+      VM_JSON=$(python3 -c "import json,base64; d={'add':'$VM_ADD','aid':'0','host':'$ARGO_NEW','id':'$UUID','net':'ws','path':'$UUID-vm','port':'443','ps':'移动ARGO','tls':'tls','sni':'$ARGO_NEW','fp':'chrome','type':'none','v':'2'}; print('vmess://'+base64.b64encode(json.dumps(d).encode()).decode())")
+      VM_RESI_JSON=$(python3 -c "import json,base64; d={'add':'$VM_ADD','aid':'0','host':'$ARGO_RESI_NEW','id':'$UUID','net':'ws','path':'$UUID-resi','port':'443','ps':'$PS_RESI','tls':'tls','sni':'$ARGO_RESI_NEW','fp':'chrome','type':'none','v':'2'}; print('vmess://'+base64.b64encode(json.dumps(d).encode()).decode())")
+      echo "$VM_JSON" > "$SB_DIR/vm_ws_argols.txt"
+      echo "$VM_RESI_JSON" > "$SB_DIR/vm_ws_argoresi.txt"
+      VM_UK_JSON=""
+      if [[ -n "$HAS_UK" ]]; then
+        if [[ -n "$ARGO_UK_NEW" ]]; then
+          VM_UK_JSON=$(python3 -c "import json,base64; d={'add':'$VM_ADD','aid':'0','host':'$ARGO_UK_NEW','id':'$UUID','net':'ws','path':'$UUID-resi-uk','port':'443','ps':'$PS_UK','tls':'tls','sni':'$ARGO_UK_NEW','fp':'chrome','type':'none','v':'2'}; print('vmess://'+base64.b64encode(json.dumps(d).encode()).decode())")
+          echo "$VM_UK_JSON" > "$SB_DIR/vm_ws_argouk.txt"
+        else
+          VM_UK_JSON=$(grep "^VMess-UK:" "$SB_DIR/nodes.txt" 2>/dev/null | cut -d' ' -f2-)
+          [[ -n "$VM_UK_JSON" ]] && log "英国 Argo 域名没取到，沿用旧链接"
+        fi
+      fi
+      VLESS_LINK=$(grep "^VLESS:" "$SB_DIR/nodes.txt" 2>/dev/null | cut -d' ' -f2-)
+      {
+        echo "VLESS: $VLESS_LINK"
+        echo "VMess-Argo: $VM_JSON"
+        echo "VMess-resi: $VM_RESI_JSON"
+        [[ -n "$VM_UK_JSON" ]] && echo "VMess-UK: $VM_UK_JSON"
+        echo "Argo 2052: $ARGO_NEW"
+        echo "Argo-resi 2053: $ARGO_RESI_NEW"
+        if [[ -n "$VM_UK_JSON" ]]; then
+          if [[ -n "$ARGO_UK_NEW" ]]; then echo "Argo-uk 2054: $ARGO_UK_NEW"; else echo "Argo-uk 2054: $ARGO_UK_OLD"; fi
+        fi
+      } > "$SB_DIR/nodes.txt"
+      # 订阅文件也跟着重生成
+      SUB_NAME_M=$(python3 -c "import json; print(json.load(open('$SB_DIR/meta.json')).get('sub_name','sub'))" 2>/dev/null || echo sub)
+      {
+        grep "^VLESS:" "$SB_DIR/nodes.txt" 2>/dev/null | cut -d' ' -f2-
+        echo "$VM_JSON"
+        echo "$VM_RESI_JSON"
+        [[ -n "$VM_UK_JSON" ]] && echo "$VM_UK_JSON"
+        grep "^VLESS-TLS:" "$SB_DIR/nodes.txt" 2>/dev/null | cut -d' ' -f2-
+      } | grep -v '^$' > "$SB_DIR/$SUB_NAME_M.txt"
+      base64 -w0 "$SB_DIR/$SUB_NAME_M.txt" > "$SB_DIR/$SUB_NAME_M.b64" 2>/dev/null || true
+      log "链接已重生成，见 $SB_DIR/nodes.txt，订阅文件已同步，客户端重新导入订阅或链接即可"
+    else
+      log "UUID 读不到，没重生成链接"
+    fi
   fi
 else
   log "Argo 域名没变，不用重生成链接"
@@ -694,6 +724,7 @@ if [[ -n "$SB_LATEST" && -n "$SB_CUR" && "$SB_LATEST" != "$SB_CUR" ]]; then
   SB_NAME="sing-box-$SB_LATEST-linux-$CPU"
   if curl -L -o /tmp/sing-box-maintain.tar.gz --retry 2 "https://github.com/SagerNet/sing-box/releases/download/v$SB_LATEST/$SB_NAME.tar.gz" 2>/dev/null; then
     tar xzf /tmp/sing-box-maintain.tar.gz -C /tmp
+    systemctl stop sing-box 2>/dev/null || true
     cp "/tmp/$SB_NAME/sing-box" "$SB_BIN"; chmod +x "$SB_BIN"
     if "$SB_BIN" check -c "$SB_JSON" >/dev/null 2>&1; then
       systemctl restart sing-box; sleep 2
@@ -716,10 +747,14 @@ if [[ -n "$CF_LATEST" && -n "$CF_CUR" && "$CF_LATEST" != "$CF_CUR" ]]; then
   log "cloudflared 有新版：$CF_CUR -> $CF_LATEST，开始更新"
   cp "$CF_BIN" "$CF_BIN.bak.$CF_CUR"
   if curl -L -o "$CF_BIN.new" --retry 2 "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$CPU" 2>/dev/null; then
-    chmod +x "$CF_BIN.new"; mv "$CF_BIN.new" "$CF_BIN"
+    chmod +x "$CF_BIN.new"
     pkill -f "cloudflared tunnel --url" 2>/dev/null || true; sleep 2
+    mv "$CF_BIN.new" "$CF_BIN"
     nohup "$CF_BIN" tunnel --url "http://localhost:$PORT_VM" --edge-ip-version auto --no-autoupdate --protocol http2 > "$SB_DIR/argo.log" 2>&1 &
     nohup "$CF_BIN" tunnel --url "http://localhost:$PORT_RESI" --edge-ip-version auto --no-autoupdate --protocol http2 > "$SB_DIR/argo-resi.log" 2>&1 &
+    if [[ -n "$PORT_UK" && "$PORT_UK" != "null" ]]; then
+      nohup "$CF_BIN" tunnel --url "http://localhost:$PORT_UK" --edge-ip-version auto --no-autoupdate --protocol http2 > "$SB_DIR/argo-uk.log" 2>&1 &
+    fi
     sleep 15
     log "cloudflared 已更新到 $CF_LATEST，隧道已重起，域名可能变了，下次维护会重生成链接"
   else
@@ -744,6 +779,111 @@ chmod +x /usr/local/bin/sb-maintain
 # 自动维护定时：每天 03:00 跑一次，重启后 30 秒跑一次（Argo 换域名自动重生成链接）
 (crontab -l 2>/dev/null | grep -v "sb-maintain"; echo "0 3 * * * /usr/local/bin/sb-maintain >> /var/log/sb-maintain.log 2>&1"; echo "@reboot sleep 30 && /usr/local/bin/sb-maintain >> /var/log/sb-maintain.log 2>&1") | crontab -
 echo "自动维护已装好：每天 03:00 自动检查更新 + 健康 + 备份，重启后自动重生成链接，日志在 /var/log/sb-maintain.log，手动跑打 sb-maintain"
+
+# 脚本自更新：仓库里的 build-minimal.sh 更新了，VPS 自动拉新版，只更新工具，不动配置
+cat > /usr/local/bin/sb-update <<'EOF_UPDATE'
+#!/bin/bash
+# sb-update —— 从 GitHub 仓库拉取最新 build-minimal.sh，只更新工具脚本，不动配置
+# 用法：sb-update（手动跑）或每天 03:30 自动跑（cron）
+# 只更新 /usr/local/bin 下的工具：sb-maintain、resi、add-resi、cdn-test、cdn-change、sb-update 自身
+# 不动：/etc/s-box/sb.json、meta.json、public.key、私钥、gist-token、gist-id、节点信息、订阅文件
+# 防自更新冲突：先把自己拷到 /tmp 再执行，/usr/local/bin/sb-update 才能被安全替换
+if [[ "${SB_UPDATE_RUN:-}" != "1" ]]; then
+  export SB_UPDATE_RUN=1
+  cp "$0" /tmp/sb-update.run 2>/dev/null && exec bash /tmp/sb-update.run "$@"
+fi
+SB_DIR=/etc/s-box
+BIN_DIR=/usr/local/bin
+LOG=/var/log/sb-update.log
+REPO_RAW="https://raw.githubusercontent.com/PLA73211/RackNerd-OneKey-Script/main/build-minimal.sh"
+VER_FILE="$SB_DIR/script-version"
+TMP_SCRIPT=/tmp/build-minimal.sh.new
+log(){ echo "$(date '+%F %T') $*"; }
+log "=== sb-update 开始 ==="
+if ! curl -fsSL --retry 2 "$REPO_RAW" -o "$TMP_SCRIPT" 2>/dev/null; then
+  log "下载仓库脚本失败，这次不更新"
+  exit 0
+fi
+if ! bash -n "$TMP_SCRIPT" 2>/dev/null; then
+  log "仓库脚本语法检查没过，这次不更新"
+  rm -f "$TMP_SCRIPT"
+  exit 0
+fi
+NEW_VER=$(grep -m1 '^VERSION=' "$TMP_SCRIPT" 2>/dev/null | cut -d'"' -f2)
+CUR_VER=$(cat "$VER_FILE" 2>/dev/null || echo "")
+if [[ -z "$NEW_VER" ]]; then
+  log "仓库脚本里没读到版本号，这次不更新"
+  rm -f "$TMP_SCRIPT"
+  exit 0
+fi
+if [[ "$NEW_VER" == "$CUR_VER" ]]; then
+  log "已是最新版（$CUR_VER），不用更新"
+  rm -f "$TMP_SCRIPT"
+  exit 0
+fi
+log "有新版：${CUR_VER:-无} -> $NEW_VER，开始更新工具"
+python3 - "$TMP_SCRIPT" "$BIN_DIR" <<'PYEOF'
+import sys, os
+src, bindir = sys.argv[1], sys.argv[2]
+tools = {
+  'EOF_RESI': 'resi',
+  'EOF_ADDRESI': 'add-resi',
+  'EOF_MAINTAIN': 'sb-maintain',
+  'EOF_CDN': 'cdn-test',
+  'EOF_CDNCHANGE': 'cdn-change',
+  'EOF_UPDATE': 'sb-update',
+}
+lines = open(src, encoding='utf-8').read().splitlines()
+out = {}
+cur = None
+for line in lines:
+  if cur is None:
+    for marker in tools:
+      if line.startswith('cat > ') and ("<<'%s'" % marker) in line:
+        cur = marker
+        out[cur] = []
+        break
+  else:
+    if line == cur:
+      cur = None
+    else:
+      out[cur].append(line)
+for marker, name in tools.items():
+  if marker in out and out[marker]:
+    p = os.path.join(bindir, name)
+    if os.path.exists(p):
+      os.replace(p, p + '.bak')
+    with open(p, 'w', encoding='utf-8') as f:
+      f.write('\n'.join(out[marker]) + '\n')
+    os.chmod(p, 0o755)
+    print('已更新 %s（%d 行）' % (name, len(out[marker])))
+  else:
+    print('没找到 %s，保持旧版' % name)
+PYEOF
+OK=1
+for t in resi add-resi sb-maintain cdn-test cdn-change sb-update; do
+  if ! bash -n "$BIN_DIR/$t" 2>/dev/null; then
+    log "$t 语法检查没过，回滚"
+    if [[ -f "$BIN_DIR/$t.bak" ]]; then mv -f "$BIN_DIR/$t.bak" "$BIN_DIR/$t"; else rm -f "$BIN_DIR/$t"; fi
+    OK=0
+  fi
+done
+if [[ "$OK" == "1" ]]; then
+  echo "$NEW_VER" > "$VER_FILE"
+  rm -f "$BIN_DIR/resi.bak" "$BIN_DIR/add-resi.bak" "$BIN_DIR/sb-maintain.bak" "$BIN_DIR/cdn-test.bak" "$BIN_DIR/cdn-change.bak" "$BIN_DIR/sb-update.bak"
+  log "工具已更新到 $NEW_VER，配置没动；sb-update 自身下次运行用新版"
+else
+  log "有工具更新失败，已回滚，版本号保持 ${CUR_VER:-无}"
+fi
+rm -f "$TMP_SCRIPT"
+log "=== sb-update 结束 ==="
+EOF_UPDATE
+chmod +x /usr/local/bin/sb-update
+# 记下当前脚本版本，sb-update 靠它判断有没有新版
+echo "$VERSION" > "$SB_DIR/script-version"
+# 自更新定时：每天 03:30 检查仓库，有新版就自动更新工具（不动配置）
+(crontab -l 2>/dev/null | grep -v "sb-update"; echo "30 3 * * * /usr/local/bin/sb-update >> /var/log/sb-update.log 2>&1") | crontab -
+echo "脚本自更新已装好：每天 03:30 自动检查仓库，有新版就更新工具（不动配置），日志在 /var/log/sb-update.log，手动跑打 sb-update"
 
 # CDN 优选生效：填了 IP 就用 IP 当 add，否则用前置域名
 VM_ADD=${CDN_IP:-$FRONT_DOMAIN}
