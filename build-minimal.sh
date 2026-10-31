@@ -1,7 +1,7 @@
 #!/bin/bash
 # build-minimal.sh —— 从零一键自搭最小版
 # 版本号：sb-update 靠它判断仓库有没有新版
-VERSION="1.1.0"
+VERSION="1.1.1"
 # 目标：只保移动 + 电信稳定，不泄露真实 IP，DNS / WebRTC 不泄露，分流统一，Wi-Fi 通话能用
 # base 最基本两个（先确保 VPS 出口）：VMess-WS 2052（Argo → VPS直连）、VLESS-Reality（电信直连 → VPS直连）
 # 住宅 IP 是后续加的：填了住宅信息才加 VMess-resi 2053（Argo → 住宅），不填就只有上面两个 VPS 直连节点
@@ -536,7 +536,7 @@ echo "$VM_RESI_JSON"
   echo "VMess-resi: $VM_RESI_JSON"
   echo "Argo-resi 2053: $ARGO_RESI"
 } > /tmp/nodes.txt.new && mv /tmp/nodes.txt.new "$SB_DIR/nodes.txt"
-SUB_NAME_M=$(python3 -c "import json; print(json.load(open('$META')).get('sub_name','sub'))" 2>/dev/null || echo sub)
+SUB_NAME_M=$(python3 -c "import json; print(json.load(open('$META')).get('sub_name') or 'sub')" 2>/dev/null || echo sub)
 {
   cat "$SB_DIR/$SUB_NAME_M.txt" 2>/dev/null | grep -v '^$'
   echo "$VM_RESI_JSON"
@@ -613,7 +613,7 @@ if ! pgrep -f "cloudflared tunnel --url http://localhost:8000" >/dev/null 2>&1; 
   sleep 15
   SUB_NEW=$(grep -a trycloudflare.com "$SB_DIR/argo-sub.log" 2>/dev/null | awk 'NR==2{print}' | awk -F// '{print $2}' | awk '{print $1}')
   if [[ -n "$SUB_NEW" ]]; then
-    SUB_NAME_M=$(python3 -c "import json; print(json.load(open('$SB_DIR/meta.json')).get('sub_name','sub'))" 2>/dev/null || echo sub)
+    SUB_NAME_M=$(python3 -c "import json; print(json.load(open('$SB_DIR/meta.json')).get('sub_name') or 'sub')" 2>/dev/null || echo sub)
     echo "https://$SUB_NEW/$SUB_NAME_M.b64" > "$SB_DIR/sub-url.txt"
     echo "$(date '+%F %T') 订阅隧道重起，新域名：$SUB_NEW" >> "$LOG"
   fi
@@ -673,7 +673,7 @@ if [[ "$NEED_REGEN" == "1" ]]; then
         fi
       } > "$SB_DIR/nodes.txt"
       # 订阅文件也跟着重生成
-      SUB_NAME_M=$(python3 -c "import json; print(json.load(open('$SB_DIR/meta.json')).get('sub_name','sub'))" 2>/dev/null || echo sub)
+      SUB_NAME_M=$(python3 -c "import json; print(json.load(open('$SB_DIR/meta.json')).get('sub_name') or 'sub')" 2>/dev/null || echo sub)
       {
         grep "^VLESS:" "$SB_DIR/nodes.txt" 2>/dev/null | cut -d' ' -f2-
         echo "$VM_JSON"
@@ -700,7 +700,7 @@ if [[ -f "$GIST_TOKEN_F" && -f "$GIST_ID_F" && -f "$SB_DIR/sub.b64" ]]; then
   CUR_HASH=$(sha256sum "$SB_DIR/sub.b64" | awk '{print $1}')
   OLD_HASH=$(cat "$GIST_HASH_F" 2>/dev/null || echo "")
   if [[ "$CUR_HASH" != "$OLD_HASH" ]]; then
-    SUB_NAME_M=$(python3 -c "import json; print(json.load(open('$SB_DIR/meta.json')).get('sub_name','sub'))" 2>/dev/null || echo sub)
+    SUB_NAME_M=$(python3 -c "import json; print(json.load(open('$SB_DIR/meta.json')).get('sub_name') or 'sub')" 2>/dev/null || echo sub)
     PUSH_JSON=$(python3 -c "import json; print(json.dumps({'files': {'$SUB_NAME_M.b64': {'content': open('$SB_DIR/$SUB_NAME_M.b64').read()}}}))")
     HTTP_CODE=$(curl -s -o /tmp/gist-push.json -w "%{http_code}" -X PATCH -H "Authorization: Bearer $GIST_TOKEN" -H "Accept: application/vnd.github+json" --data "$PUSH_JSON" "https://api.github.com/gists/$GIST_ID")
     if [[ "$HTTP_CODE" == "200" ]]; then
@@ -958,7 +958,7 @@ fi
 cat > "$SB_DIR/meta.json" <<EOF_META
 {
   "front_domain": "$FRONT_DOMAIN",
-  "sub_name": "$SUB_NAME",
+  "sub_name": "${SUB_NAME:-sub}",
   "ps_resi": "$PS_RESI",
   "ps_uk": "$PS_UK",
   "has_resi": "$([[ -n "${RESI_IP:-}" ]] && echo true || echo false)",
@@ -1076,7 +1076,7 @@ VLESS_TLS_LINK=$(grep "^VLESS-TLS:" "$SB_DIR/nodes.txt" 2>/dev/null | cut -d' ' 
   echo "Argo 2052: $ARGO"
   echo "Argo-resi 2053: $ARGO_RESI"
 } > "$SB_DIR/nodes.txt"
-SUB_NAME_M=$(python3 -c "import json; print(json.load(open('$SB_DIR/meta.json')).get('sub_name','sub'))" 2>/dev/null || echo sub)
+SUB_NAME_M=$(python3 -c "import json; print(json.load(open('$SB_DIR/meta.json')).get('sub_name') or 'sub')" 2>/dev/null || echo sub)
 {
   echo "$VLESS_LINK"
   echo "$VM_JSON"
