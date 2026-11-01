@@ -1,7 +1,7 @@
 #!/bin/bash
 # build-minimal.sh —— 从零一键自搭最小版
 # 版本号：sb-update 靠它判断仓库有没有新版
-VERSION="1.1.1"
+VERSION="1.1.2"
 # 目标：只保移动 + 电信稳定，不泄露真实 IP，DNS / WebRTC 不泄露，分流统一，Wi-Fi 通话能用
 # base 最基本两个（先确保 VPS 出口）：VMess-WS 2052（Argo → VPS直连）、VLESS-Reality（电信直连 → VPS直连）
 # 住宅 IP 是后续加的：填了住宅信息才加 VMess-resi 2053（Argo → 住宅），不填就只有上面两个 VPS 直连节点
@@ -82,7 +82,7 @@ fi
 
 echo "=== 2/7 装依赖 ==="
 apt update -y
-apt install -y jq curl wget openssl qrencode python3 xxd iproute2 cron 2>/dev/null || apt install -y jq curl wget openssl python3 xxd iproute2 cron
+apt install -y jq curl wget openssl qrencode python3 xxd iproute2 cron ufw fail2ban 2>/dev/null || apt install -y jq curl wget openssl python3 xxd iproute2 cron ufw fail2ban
 mkdir -p "$SB_DIR"
 
 # 查住宅 IP 归属地转中文名：US->美国，GB->英国，JP->日本，KR->韩国，DE->德国，FR->法国，CA->加拿大，AU->澳大利亚，SG->新加坡，HK->香港，TW->台湾，查不到就用国家代码
@@ -408,6 +408,13 @@ if command -v ufw >/dev/null 2>&1; then
 else
   iptables -I INPUT -p tcp --dport "$PORT_VLESS" -j ACCEPT 2>/dev/null || true
 fi
+
+# 安全加固：防火墙先放行 SSH 再启用（只开 22 + VLESS 直连端口），防爆破开机自启
+if command -v ufw >/dev/null 2>&1; then
+  ufw allow 22/tcp >/dev/null 2>&1 || true
+  ufw --force enable >/dev/null 2>&1 || true
+fi
+systemctl enable --now fail2ban >/dev/null 2>&1 || true
 
 echo "起 Argo 临时隧道（VPS 出口那条一定起，住宅那条填了住宅才起）……"
 pkill -f "cloudflared tunnel --url http://localhost:$PORT_VM" 2>/dev/null || true
